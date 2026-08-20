@@ -1,0 +1,59 @@
+name: Relatorio de Desempenho
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # watcher: a cada 30min, le Gmail e atualiza o Supabase
+    - cron: "0 12 * * *"     # notificacao/justificativa: 1x/dia, 12:00 UTC = 09:00 Brasilia
+  workflow_dispatch: {}      # manual - roda tudo (watcher + notificacao + justificativa)
+
+jobs:
+  watcher:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/30 * * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SUPABASE_RELATORIO_URL: ${{ secrets.SUPABASE_RELATORIO_URL }}
+      SUPABASE_RELATORIO_SERVICE_KEY: ${{ secrets.SUPABASE_RELATORIO_SERVICE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+
+      - name: Restaurar credenciais Gmail
+        run: |
+          mkdir -p email
+          printf '%s' '${{ secrets.GMAIL_CLIENT_SECRET_JSON }}' > email/client_secret.json
+          printf '%s' '${{ secrets.GMAIL_TOKEN_JSON }}' > email/token.json
+
+      - name: Verificar novos relatorios no Gmail
+        run: python3 watch_relatorio_desempenho.py --max 500
+
+  notificacao:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 12 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BUBBLE_API_KEY_LIVE: ${{ secrets.BUBBLE_API_KEY_LIVE }}
+      BUBBLE_AUTOMACAO_USER_ID_LIVE: ${{ secrets.BUBBLE_AUTOMACAO_USER_ID_LIVE }}
+      SUPABASE_RELATORIO_URL: ${{ secrets.SUPABASE_RELATORIO_URL }}
+      SUPABASE_RELATORIO_SERVICE_KEY: ${{ secrets.SUPABASE_RELATORIO_SERVICE_KEY }}
+      BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+      BREVO_SENDER_EMAIL: ${{ secrets.BREVO_SENDER_EMAIL }}
+      BREVO_SENDER_NOME: ${{ secrets.BREVO_SENDER_NOME }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+
+      - name: Checar relatorios pendentes e notificar gestores
+        run: python3 check_relatorios_pendentes.py --env live
+
+      - name: Abrir ciclo de justificativa (so age no 1o dia util do mes)
+        run: python3 enviar_justificativa_atraso.py --env live
+
+      - name: Fechar ciclos de justificativa concluidos e avisar coordenadores
+        run: python3 enviar_analise_atrasos.py

@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Justificar atraso de relatório — Tendência Energia (demo)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --sidebar-bg:     #0B4A63;
+    --primary:        #24A77A;
+    --primary-hover:  #1F946D;
+    --primary-soft:   #E7F7F0;
+    --app-bg:         #F5F6FB;
+    --card-bg:        #FFFFFF;
+    --border:         #DDE4EE;
+    --text-primary:   #1F2430;
+    --text-secondary: #667085;
+    --text-muted:     #98A2B3;
+    --error:          #EF3E4A;
+    --error-bg:       #FFE0E0;
+  }
+  * , *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+    background: var(--app-bg);
+    color: var(--text-primary);
+    min-height: 100vh;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 40px 16px;
+  }
+  .wrap { width: 480px; max-width: 100%; }
+  .header {
+    background: var(--sidebar-bg);
+    border-radius: 14px 14px 0 0;
+    padding: 20px 28px;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+  }
+  .logo {
+    width: 32px; height: 32px; background: var(--primary); border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 13px; color: #fff;
+  }
+  .header-title { color: #fff; font-size: 14.5px; font-weight: 700; }
+  .card {
+    background: var(--card-bg);
+    border-radius: 0 0 14px 14px;
+    box-shadow: 0 8px 24px rgba(15,23,42,0.08);
+    padding: 32px 28px;
+  }
+  .badge {
+    display: inline-block; background: var(--primary-soft); color: var(--primary-hover);
+    font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+    padding: 5px 12px; border-radius: 999px; margin-bottom: 16px;
+  }
+  h1 { font-size: 19px; font-weight: 700; line-height: 1.35; margin-bottom: 8px; }
+  .subtitle { font-size: 13.5px; color: var(--text-secondary); line-height: 1.55; margin-bottom: 22px; }
+  .progress-track { height: 6px; background: var(--border); border-radius: 999px; overflow: hidden; margin-bottom: 24px; }
+  .progress-fill { height: 100%; background: var(--primary); border-radius: 999px; transition: width .3s ease; }
+  .uc-card {
+    border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+    background: #FAFCFF; margin-bottom: 18px;
+  }
+  .uc-cliente { font-size: 14.5px; font-weight: 600; color: var(--text-primary); }
+  .uc-meta { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+  label.field-label { display: block; font-size: 12.5px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
+  select.motivo-select {
+    width: 100%; padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px;
+    font-family: inherit; font-size: 13.5px; color: var(--text-primary); background: #fff;
+    margin-bottom: 18px; appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23667085' stroke-width='1.6' fill='none' fill-rule='evenodd'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 14px center;
+  }
+  select.motivo-select:focus { outline: none; border-color: var(--primary); }
+  button.btn-primary {
+    width: 100%; background: var(--primary); color: #fff; border: none; border-radius: 8px;
+    padding: 13px 20px; font-family: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
+  }
+  button.btn-primary:hover { background: var(--primary-hover); }
+  button.btn-primary:disabled { opacity: .55; cursor: not-allowed; }
+  .footer-note { text-align: center; font-size: 11.5px; color: var(--text-muted); margin-top: 16px; }
+  .state-icon { font-size: 34px; margin-bottom: 14px; }
+  .center { text-align: center; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <div class="header">
+    <div class="logo">TE</div>
+    <div class="header-title">Tendência Energia</div>
+  </div>
+  <div class="card">
+
+    <div id="state-concluido" class="hidden center">
+      <div class="state-icon">✅</div>
+      <h1>Tudo certo!</h1>
+      <p class="subtitle">Não há nenhuma UC pendente de justificativa no seu nome. Obrigado por responder.</p>
+    </div>
+
+    <div id="state-form">
+      <div class="badge">Justificativa pendente</div>
+      <h1>Por que essa UC ficou sem relatório?</h1>
+      <p class="subtitle">Responda uma UC por vez. Ao concluir, a próxima pendente aparece automaticamente.</p>
+
+      <div class="progress-track"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+
+      <div class="uc-card">
+        <div class="uc-cliente" id="uc-cliente">—</div>
+        <div class="uc-meta" id="uc-meta">—</div>
+      </div>
+
+      <label class="field-label" for="motivo-select">Motivo do atraso</label>
+      <select id="motivo-select" class="motivo-select">
+        <option value="" disabled selected>Selecione um motivo…</option>
+        <option>Inscrição estadual baixada</option>
+        <option>NF com volume divergente da fatura de energia</option>
+        <option>Volume da fatura divergente da NF</option>
+        <option>Faturamento a menor da distribuidora</option>
+        <option>Cliente não recebeu fatura</option>
+        <option>Distribuidora não emitiu a fatura</option>
+        <option>Cliente não enviou a fatura/não disponibilizou dados de acesso</option>
+      </select>
+
+      <button class="btn-primary" id="btn-concluir" onclick="responder()">Concluir e ir pra próxima</button>
+    </div>
+
+    <p class="footer-note">Tendência Energia — Relatório de Desempenho Mercado Livre</p>
+  </div>
+</div>
+
+<script>
+  var itens = [
+    { uc_codigo: "55859805310", cliente_nome: "GeloArt Comércio de Gelo Ltda", mes: 7, ano: 2026 },
+    { uc_codigo: "40871122098", cliente_nome: "Torre Hotel Empreendimentos", mes: 7, ano: 2026 },
+    { uc_codigo: "30219948701", cliente_nome: "Glória Participações S.A.", mes: 7, ano: 2026 }
+  ];
+  var totalInicial = itens.length;
+  var idx = 0;
+
+  function atualizarProgresso() {
+    var pct = Math.round((idx / totalInicial) * 100);
+    document.getElementById("progress-fill").style.width = pct + "%";
+  }
+
+  function mostrarItemAtual() {
+    if (idx >= itens.length) {
+      document.getElementById("state-form").classList.add("hidden");
+      document.getElementById("state-concluido").classList.remove("hidden");
+      return;
+    }
+    var item = itens[idx];
+    document.getElementById("uc-cliente").textContent = item.cliente_nome;
+    document.getElementById("uc-meta").textContent =
+      "UC " + item.uc_codigo + " · relatório de " + String(item.mes).padStart(2, "0") + "/" + item.ano;
+    document.getElementById("motivo-select").value = "";
+    document.getElementById("btn-concluir").disabled = false;
+    atualizarProgresso();
+  }
+
+  function responder() {
+    var motivo = document.getElementById("motivo-select").value;
+    if (!motivo) {
+      document.getElementById("motivo-select").focus();
+      return;
+    }
+    idx += 1;
+    mostrarItemAtual();
+  }
+
+  mostrarItemAtual();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,6 @@
+.env.local
+email/client_secret.json
+email/token.json
+email/downloads/
+__pycache__/
+*.pyc
