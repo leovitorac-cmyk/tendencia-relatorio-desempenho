@@ -3,8 +3,18 @@ name: Relatorio de Desempenho
 on:
   schedule:
     - cron: "*/30 * * * *"   # watcher: a cada 30min, le Gmail e atualiza o Supabase
-    - cron: "0 12 * * *"     # notificacao/justificativa: 1x/dia, 12:00 UTC = 09:00 Brasilia
-  workflow_dispatch: {}      # manual - roda tudo (watcher + notificacao + justificativa)
+    - cron: "30 10 * * *"    # notificacao manha (7:30 Brasilia) - unica que cria Solicitacao, dia 20
+    - cron: "30 16 * * *"    # notificacao tarde (13:30 Brasilia) - so email, reenvia pra quem continua pendente
+  workflow_dispatch:
+    inputs:
+      turno:
+        description: "Turno (so usado se disparar a notificacao manualmente)"
+        required: false
+        default: manha
+        type: choice
+        options:
+          - manha
+          - tarde
 
 jobs:
   watcher:
@@ -31,7 +41,7 @@ jobs:
         run: python3 watch_relatorio_desempenho.py --max 500
 
   notificacao:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 12 * * *'
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 10 * * *' || github.event.schedule == '30 16 * * *'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -49,11 +59,24 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt
 
-      - name: Checar relatorios pendentes e notificar gestores
-        run: python3 check_relatorios_pendentes.py --env live
+      - name: Determinar turno da rodada
+        id: turno
+        run: |
+          if [ "${{ github.event.schedule }}" = "30 10 * * *" ]; then
+            echo "valor=manha" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "30 16 * * *" ]; then
+            echo "valor=tarde" >> "$GITHUB_OUTPUT"
+          else
+            echo "valor=${{ github.event.inputs.turno }}" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Abrir ciclo de justificativa (so age no 1o dia util do mes)
+      - name: Checar relatorios pendentes e notificar gestores
+        run: python3 check_relatorios_pendentes.py --env live --turno ${{ steps.turno.outputs.valor }}
+
+      - name: Abrir ciclo de justificativa (so na rodada da manha, so age no 1o dia util do mes)
+        if: steps.turno.outputs.valor == 'manha'
         run: python3 enviar_justificativa_atraso.py --env live
 
       - name: Fechar ciclos de justificativa concluidos e avisar coordenadores
+        if: steps.turno.outputs.valor == 'manha'
         run: python3 enviar_analise_atrasos.py

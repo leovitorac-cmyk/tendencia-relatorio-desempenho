@@ -1,20 +1,33 @@
 """
-Roda nos dias 15, 20, 22, 25 e todo dia até o fim do mês: cruza `ucs_gestor` ×
-`relatorios_recebidos` do mês de referência (mês anterior ao atual — em agosto
-checa o relatório de julho), notifica (Brevo) cada gestor com UC(s) pendente(s).
+Regras definitivas (Leo, 2026-08-20). Roda 2x por dia (manhã ~7:30 e tarde
+~13:30, horário de Brasília — a 2ª rodada existe pra pegar quem a equipe
+enviou o relatório entre as duas), nos dias 20, 22, 25, 26, 27, 28, 29, 30
+e 31 de cada mês. Se um desses dias cair em sábado/domingo, desloca só
+aquele dia pro próximo dia útil (não afeta os outros dias já configurados
+— ver `_dia_efetivo`). Cruza `ucs_gestor` × `relatorios_recebidos` do mês
+de referência (mês anterior ao atual — em agosto checa o relatório de
+julho) e notifica (Brevo) cada gestor com UC(s) pendente(s).
 
-Cria Solicitacao no Bubble (1 por UC pendente) **só no dia 20** — nos demais
-dias de checagem (15, 22, 25-31) é só o e-mail, sem card no CRM.
+Cria Solicitacao no Bubble (1 por UC pendente) **só na rodada da manhã do
+dia 20** (ajustado pro próximo dia útil se cair fim de semana) — em todas
+as outras rodadas (tarde do dia 20, e qualquer rodada dos outros dias) é
+só o e-mail, sem card no CRM.
 
-Dedupe: cada UC pendente vira 1 linha em `relatorios_recebidos` (recebido=false)
-com `notificado_em` preenchido — reruns no mesmo ciclo (15→20→22→25... sem
-receber o relatório) não notificam de novo pra UCs já marcadas.
+Sem dedupe entre rodadas: cada rodada (mesmo no mesmo dia) reenvia email
+pra quem continuar pendente — decisão do Leo, pra manter o gestor ciente
+a cada checagem, mesmo que já tenha sido avisado antes no mesmo ciclo.
+`notificado_em` é só registro histórico (última vez que essa UC apareceu
+numa notificação), não bloqueia mais reenvio.
+
+Trava só na criação de Solicitacao: se a UC já tem `solicitacao_bubble_id`
+gravado pra esse mes/ano (de uma rodada anterior), não cria outra — evita
+card duplicado no CRM se a rodada de criação rodar 2x por engano.
 
 Uso:
-  python3 check_relatorios_pendentes.py --dry-run              # não escreve nada
-  python3 check_relatorios_pendentes.py --force --dry-run      # ignora a checagem de dia
-  python3 check_relatorios_pendentes.py                        # roda de verdade (uso via cron, todo dia)
-  python3 check_relatorios_pendentes.py --env live             # default é test
+  python3 check_relatorios_pendentes.py --turno manha --dry-run   # não escreve nada
+  python3 check_relatorios_pendentes.py --turno manha --force --dry-run  # ignora a checagem de dia
+  python3 check_relatorios_pendentes.py --turno manha             # roda de verdade (uso via cron)
+  python3 check_relatorios_pendentes.py --turno tarde --env live  # rodada da tarde, sem Solicitacao
 """
 
 import argparse
@@ -22,7 +35,7 @@ import calendar
 import logging
 import os
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -37,7 +50,30 @@ BUBBLE_BASE_URLS = {
     "live": "https://plataforma.tendenciaenergia.com.br/api/1.1",
 }
 
-DIAS_CHECAGEM = {15, 20, 22, 25, 26, 27, 28, 29, 30, 31}
+DIAS_CHECAGEM_BASE = {20, 22, 25, 26, 27, 28, 29, 30, 31}
+DIA_CRIACAO_CARD = 20  # dia (não ajustado) — card só na rodada de manhã desse dia
+
+
+def _proximo_dia_util(d):
+    while d.weekday() >= 5:  # 5=sábado, 6=domingo
+        d += timedelta(days=1)
+    return d
+
+
+def _dia_efetivo(ano, mes, dia_original):
+    """Dia real em que a checagem do `dia_original` acontece nesse mês —
+    igual ao original, exceto se cair em fim de semana, aí desloca pro
+    próximo dia útil. Retorna None se o mês não tem esse dia (ex.: 30/31
+    em fevereiro)."""
+    try:
+        d = date(ano, mes, dia_original)
+    except ValueError:
+        return None
+    return _proximo_dia_util(d)
+
+
+def _dias_checagem_efetivos(ano, mes):
+    return {d for d in (_dia_efetivo(ano, mes, dia) for dia in DIAS_CHECAGEM_BASE) if d}
 
 # Coordenadores — recebem, em todo dia de checagem, 1 e-mail consolidado com
 # as pendências de TODOS os gestores (separado por seção por gestor). Diogo
@@ -59,14 +95,13 @@ def get_bubble_key(env_name):
     key = env.get(var) or os.environ.get(var)
     if not key:
         raise SystemExit(f"ERRO: {var} não encontrada em .env.local")
-    return key.strip()
+    return key
 
 
 def get_automacao_user_id(env_name):
     env = load_env()
     var = f"BUBBLE_AUTOMACAO_USER_ID_{env_name.upper()}"
-    val = env.get(var) or os.environ.get(var)
-    return val.strip() if val else val
+    return env.get(var) or os.environ.get(var)
 
 
 def get_brevo_config():
@@ -76,7 +111,6 @@ def get_brevo_config():
     sender_nome = env.get("BREVO_SENDER_NOME") or os.environ.get("BREVO_SENDER_NOME") or "Tendência Energia"
     if not api_key or not sender_email:
         raise SystemExit("ERRO: BREVO_API_KEY/BREVO_SENDER_EMAIL não encontrados em .env.local")
-    api_key, sender_email, sender_nome = api_key.strip(), sender_email.strip(), sender_nome.strip()
     return api_key, sender_email, sender_nome
 
 
@@ -93,8 +127,8 @@ def buscar_pendentes(mes, ano):
         existente = por_uc.get(uc["uc_codigo"])
         if existente and existente.get("recebido"):
             continue
-        if existente and existente.get("notificado_em"):
-            continue
+        uc = dict(uc)
+        uc["_solicitacao_existente"] = existente.get("solicitacao_bubble_id") if existente else None
         pendentes.append(uc)
     return pendentes
 
@@ -231,16 +265,20 @@ def criar_solicitacao_bubble(env_name, uc, mes, ano):
     return resp.json().get("id")
 
 
-def run(env_name="test", force=False, dry_run=False):
+def run(env_name="test", turno="manha", force=False, dry_run=False):
     today = date.today()
-    if not force and today.day not in DIAS_CHECAGEM:
-        log.info("dia %d não é dia de checagem (%s) — nada a fazer (use --force pra ignorar)", today.day, DIAS_CHECAGEM)
+    dias_efetivos = _dias_checagem_efetivos(today.year, today.month)
+    if not force and today not in dias_efetivos:
+        log.info(
+            "dia %s não é dia de checagem efetivo esse mês (%s) — nada a fazer (use --force pra ignorar)",
+            today, sorted(dias_efetivos),
+        )
         return
 
     mes = today.month - 1 or 12
     ano = today.year if today.month > 1 else today.year - 1
     pendentes = buscar_pendentes(mes, ano)
-    log.info("%d UCs pendentes de relatório em %02d/%d", len(pendentes), mes, ano)
+    log.info("%d UCs pendentes de relatório em %02d/%d (turno=%s)", len(pendentes), mes, ano, turno)
 
     if not pendentes:
         return
@@ -249,7 +287,8 @@ def run(env_name="test", force=False, dry_run=False):
     for uc in pendentes:
         por_gestor[uc["gestor_email"]].append(uc)
 
-    cria_solicitacao = today.day == 20
+    dia_20_efetivo = _dia_efetivo(today.year, today.month, DIA_CRIACAO_CARD)
+    cria_solicitacao = turno == "manha" and today == dia_20_efetivo
     total_notificados = total_solicitacoes = 0
 
     for gestor_email, ucs_pendentes in por_gestor.items():
@@ -276,7 +315,7 @@ def run(env_name="test", force=False, dry_run=False):
                 "recebido": False,
                 "notificado_em": datetime.now(timezone.utc).isoformat(),
             }
-            if cria_solicitacao:
+            if cria_solicitacao and not uc.get("_solicitacao_existente"):
                 row["solicitacao_bubble_id"] = criar_solicitacao_bubble(env_name, uc, mes, ano)
                 total_solicitacoes += 1
             rows_upsert.append(row)
@@ -302,10 +341,14 @@ def run(env_name="test", force=False, dry_run=False):
 def main():
     parser = argparse.ArgumentParser(description="Verifica UCs sem relatório de desempenho e notifica gestores")
     parser.add_argument("--env", choices=["test", "live"], default="test", help="Ambiente Bubble (default: test)")
+    parser.add_argument(
+        "--turno", choices=["manha", "tarde"], default="manha",
+        help="Rodada do dia — só a de manhã do dia 20 cria Solicitacao no Bubble (default: manha)",
+    )
     parser.add_argument("--force", action="store_true", help="Roda mesmo fora dos dias de checagem")
     parser.add_argument("--dry-run", action="store_true", help="Não envia email nem escreve nada, só mostra o que faria")
     args = parser.parse_args()
-    run(env_name=args.env, force=args.force, dry_run=args.dry_run)
+    run(env_name=args.env, turno=args.turno, force=args.force, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
