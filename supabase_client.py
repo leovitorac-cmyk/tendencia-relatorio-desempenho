@@ -31,7 +31,10 @@ def _config():
     key = env.get("SUPABASE_RELATORIO_SERVICE_KEY") or os.environ.get("SUPABASE_RELATORIO_SERVICE_KEY")
     if not url or not key:
         raise SystemExit("ERRO: SUPABASE_RELATORIO_URL/SUPABASE_RELATORIO_SERVICE_KEY não encontrados em .env.local")
-    return url.rstrip("/"), key
+    # .strip() defende contra secret do GitHub Actions colado com quebra de
+    # linha sobrando no final (copiar de um bloco de código no navegador às
+    # vezes traz o \n junto) — sem isso vira %0a colado na URL/host.
+    return url.strip().rstrip("/"), key.strip()
 
 
 def _headers(key, prefer=None):
