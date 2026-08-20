@@ -38,18 +38,27 @@ SEGMENT_SPLIT_PATTERN = re.compile(r"\s+-\s+")
 MAX_LINHA_IDENTIFICACAO = 150  # linha de identificação de UC é curta; descarta parágrafos
 
 
-MIN_TAMANHO_CODIGO = 5  # descarta abreviações tipo "I5" (perfil de carga), menor código real visto tem 7
+MIN_TAMANHO_CODIGO = 5  # descarta abreviações alfanuméricas tipo "I5" (perfil de carga)
+MIN_TAMANHO_CODIGO_NUMERICO = 3  # UC 100% numérica pode ser bem curta de verdade
 CNPJ_SHAPE = re.compile(r"^\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}$")  # linha pode citar o CNPJ do cliente à parte, isso não é UC
 
 
 def _looks_like_code(segment):
+    """Bug real descoberto 2026-08-20: BCS RESTAURANTE ("2220") e LETOM
+    MOTEL ("270") têm UC de 3-4 dígitos — o filtro antigo (mínimo 5
+    caracteres pra qualquer coisa) descartava a linha inteira sem log
+    nenhum, achando que era abreviação tipo "I5" (perfil de carga, sempre
+    letra+dígito). Diferença: código 100% numérico pode ser curto de
+    verdade; abreviação alfanumérica tipo "I5"/"A4" não passa de 2
+    caracteres — mínimo mais baixo só pra dígito puro não reabre esse
+    problema."""
     if CNPJ_SHAPE.match(segment):
         return False
-    return (
-        len(segment) >= MIN_TAMANHO_CODIGO
-        and " " not in segment
-        and any(c.isdigit() for c in segment)
-    )
+    if " " in segment or not any(c.isdigit() for c in segment):
+        return False
+    if segment.isdigit():
+        return len(segment) >= MIN_TAMANHO_CODIGO_NUMERICO
+    return len(segment) >= MIN_TAMANHO_CODIGO
 
 
 CODE_CITY_GLUED_PATTERN = re.compile(r"^([\w./]+?)-([A-ZÀ-Ü][A-ZÀ-Ü\s]*)$")
