@@ -105,13 +105,16 @@ def get_bubble_key(env_name):
     key = env.get(var) or os.environ.get(var)
     if not key:
         raise SystemExit(f"ERRO: {var} não encontrada em .env.local")
-    return key
+    # .strip() defende contra secret do GitHub Actions colado com quebra de
+    # linha sobrando no final (mesmo problema já corrigido em supabase_client.py)
+    return key.strip()
 
 
 def get_automacao_user_id(env_name):
     env = load_env()
     var = f"BUBBLE_AUTOMACAO_USER_ID_{env_name.upper()}"
-    return env.get(var) or os.environ.get(var)
+    value = env.get(var) or os.environ.get(var)
+    return value.strip() if value else value
 
 
 def get_brevo_config():
@@ -121,7 +124,7 @@ def get_brevo_config():
     sender_nome = env.get("BREVO_SENDER_NOME") or os.environ.get("BREVO_SENDER_NOME") or "Tendência Energia"
     if not api_key or not sender_email:
         raise SystemExit("ERRO: BREVO_API_KEY/BREVO_SENDER_EMAIL não encontrados em .env.local")
-    return api_key, sender_email, sender_nome
+    return api_key.strip(), sender_email.strip(), sender_nome.strip()
 
 
 def buscar_pendentes(mes, ano):
