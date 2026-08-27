@@ -181,11 +181,57 @@ def email_template(badge, heading, body_html):
 </body></html>"""
 
 
-def montar_uc_cards_html(ucs_pendentes, mostrar_gestor=False):
+# Valores brutos da coluna "Custo Serviço" da planilha original — trazida
+# pra `ucs_gestor.custo_servico` em 2026-08-20 (migration_custo_servico.sql
+# + import_custo_servico.py). Confirmado pelo Leo: "% sobre Economia" =
+# cliente variável, "Valor Fixo" = cliente fixo.
+TIPO_COBRANCA_LABEL = {
+    "% sobre Economia": "Variável",
+    "Valor Fixo": "Fixa",
+    "Valor Fixo + % sobre Economia": "Híbrida",
+    "Inexistente": "Sem custo definido",
+}
+
+# Variável sempre primeiro em qualquer lista/seção — cobrança variável só é
+# emitida quando o relatório sai (diferente da fixa, que sai numa data fixa
+# independente do relatório), então é o tipo mais urgente de destravar.
+ORDEM_TIPO = ["Variável", "Fixa", "Híbrida", "Sem custo definido", "Não informado"]
+
+TIPO_COR = {
+    "Variável": "#EF3E4A",
+    "Fixa": "#667085",
+    "Híbrida": "#2E6FE0",
+    "Sem custo definido": "#98A2B3",
+    "Não informado": "#98A2B3",
+}
+
+TEXTO_EXPLICATIVO_TIPO = (
+    '<p style="margin:0 0 16px;font-size:12px;color:#98A2B3;">'
+    'UCs <b>Variável</b> aparecem primeiro: a cobrança delas só é emitida quando '
+    'o relatório sai. UCs <b>Fixa</b> são cobradas numa data fixa, independente '
+    'do relatório.</p>'
+)
+
+
+def tipo_cobranca_label(uc):
+    return TIPO_COBRANCA_LABEL.get((uc.get("custo_servico") or "").strip(), "Não informado")
+
+
+def _ordenar_por_tipo(ucs_pendentes):
+    ordem_idx = {tipo: i for i, tipo in enumerate(ORDEM_TIPO)}
+    return sorted(ucs_pendentes, key=lambda uc: ordem_idx.get(tipo_cobranca_label(uc), len(ORDEM_TIPO)))
+
+
+def montar_uc_cards_html(ucs_pendentes, mostrar_gestor=False, mostrar_tipo=False):
     return "".join(
         f'<div style="border:1px solid #DDE4EE;border-radius:10px;padding:10px 14px;margin-bottom:8px;background:#FAFCFF;">'
         f'<span style="font-size:13.5px;font-weight:600;color:#1F2430;">{uc.get("cliente_nome") or "cliente não identificado"}</span>'
-        f'<div style="font-size:12px;color:#667085;margin-top:3px;">UC {uc["uc_codigo"]}'
+        + (
+            f'<span style="float:right;font-size:10.5px;font-weight:700;'
+            f'color:{TIPO_COR.get(tipo_cobranca_label(uc), "#98A2B3")};">{tipo_cobranca_label(uc)}</span>'
+            if mostrar_tipo else ''
+        )
+        + f'<div style="font-size:12px;color:#667085;margin-top:3px;">UC {uc["uc_codigo"]}'
         + (f' · Gestor: <b>{uc["gestor_nome"]}</b>' if mostrar_gestor else '')
         + '</div></div>'
         for uc in ucs_pendentes
@@ -207,8 +253,32 @@ def montar_secao_gestor_html(gestor_nome, ucs_pendentes, total_gestor):
         f'<span style="display:inline-block;background:#E7F7F0;color:#1F946D;font-size:11px;font-weight:700;'
         f'padding:3px 10px;border-radius:999px;">{gestor_nome} ({len(ucs_pendentes)})</span>'
         f'<span style="margin-left:8px;font-size:11.5px;color:#98A2B3;">{stats_texto(len(ucs_pendentes), total_gestor)}</span></p>'
+        f'{montar_uc_cards_html(_ordenar_por_tipo(ucs_pendentes), mostrar_tipo=True)}'
+    )
+
+
+def montar_secao_tipo_html(tipo_label, ucs_pendentes):
+    return (
+        f'<p style="margin:18px 0 8px;">'
+        f'<span style="display:inline-block;background:#E7F7F0;color:#1F946D;font-size:11px;font-weight:700;'
+        f'padding:3px 10px;border-radius:999px;">{tipo_label} ({len(ucs_pendentes)})</span></p>'
         f'{montar_uc_cards_html(ucs_pendentes)}'
     )
+
+
+def montar_corpo_por_tipo_html(pendentes):
+    """Agrupa UCs por tipo de cobrança (Variável/Fixa/Híbrida), Variável
+    sempre primeiro — reaproveitado no email do gestor individual e no do
+    financeiro."""
+    por_tipo = defaultdict(list)
+    for uc in pendentes:
+        por_tipo[tipo_cobranca_label(uc)].append(uc)
+    secoes = "".join(
+        montar_secao_tipo_html(tipo, por_tipo[tipo])
+        for tipo in ORDEM_TIPO
+        if por_tipo.get(tipo)
+    )
+    return TEXTO_EXPLICATIVO_TIPO + secoes
 
 
 def enviar_email(to_nome, to_email, assunto, corpo_html):
@@ -233,7 +303,7 @@ def enviar_email_brevo(gestor_nome, gestor_email, ucs_pendentes, mes, ano, total
         f"Olá, {gestor_nome}! {stats_texto(len(ucs_pendentes), total_gestor)} "
         f"de relatório de {mes:02d}/{ano}."
     )
-    html = email_template("Relatório pendente", heading, montar_uc_cards_html(ucs_pendentes))
+    html = email_template("Relatório pendente", heading, montar_corpo_por_tipo_html(ucs_pendentes))
     return enviar_email(
         gestor_nome, gestor_email,
         f"Relatório de desempenho pendente — {len(ucs_pendentes)} UC(s) — {mes:02d}/{ano}",
@@ -247,7 +317,7 @@ def enviar_email_consolidado_brevo(to_nome, to_email, por_gestor, mes, ano, tota
         f"Olá, {to_nome}! Resumo consolidado — {stats_texto(total_pendente, total_geral)} "
         f"pendentes em {mes:02d}/{ano}, por gestor."
     )
-    corpo = "".join(
+    corpo = TEXTO_EXPLICATIVO_TIPO + "".join(
         montar_secao_gestor_html(ucs[0]["gestor_nome"], ucs, totais_por_gestor.get(gestor_email, len(ucs)))
         for gestor_email, ucs in por_gestor.items()
     )
@@ -262,14 +332,17 @@ def enviar_email_consolidado_brevo(to_nome, to_email, por_gestor, mes, ano, tota
 def enviar_email_financeiro_brevo(to_nome, to_email, pendentes, mes, ano, total_geral):
     """Igual ao consolidado dos coordenadores, mas SEM separar por gestor —
     Julio/financeiro só precisam saber quais clientes estão pendentes, não
-    quem é o gestor responsável (decisão do Leo, 2026-08-20)."""
+    quem é o gestor responsável (decisão do Leo, 2026-08-20). Separado por
+    tipo de cobrança (Variável/Fixa/Híbrida) em vez disso — pedido do Leo
+    no mesmo dia, depois de descobrir que a planilha original já tinha
+    essa info (coluna "Custo Serviço", nunca importada pro Supabase até
+    então — ver `import_custo_servico.py`)."""
+    corpo = montar_corpo_por_tipo_html(pendentes)
     heading = (
         f"Olá, {to_nome}! {stats_texto(len(pendentes), total_geral)} "
         f"de relatório de desempenho em {mes:02d}/{ano}."
     )
-    html = email_template(
-        "Relatório pendente", heading, montar_uc_cards_html(pendentes, mostrar_gestor=False)
-    )
+    html = email_template("Relatório pendente", heading, corpo)
     return enviar_email(
         to_nome, to_email,
         f"Relatório de desempenho pendente — {len(pendentes)} UC(s) — {mes:02d}/{ano}",

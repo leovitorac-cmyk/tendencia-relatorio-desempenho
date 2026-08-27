@@ -31,9 +31,6 @@ def _config():
     key = env.get("SUPABASE_RELATORIO_SERVICE_KEY") or os.environ.get("SUPABASE_RELATORIO_SERVICE_KEY")
     if not url or not key:
         raise SystemExit("ERRO: SUPABASE_RELATORIO_URL/SUPABASE_RELATORIO_SERVICE_KEY não encontrados em .env.local")
-    # .strip() defende contra secret do GitHub Actions colado com quebra de
-    # linha sobrando no final (copiar de um bloco de código no navegador às
-    # vezes traz o \n junto) — sem isso vira %0a colado na URL/host.
     return url.strip().rstrip("/"), key.strip()
 
 
@@ -57,6 +54,18 @@ def select(table, filters=None, select_cols="*"):
     resp = requests.get(f"{url}/rest/v1/{table}", headers=_headers(key), params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def update(table, filters, patch):
+    """Atualiza (PATCH) linhas que casam com `filters` (dict de query PostgREST,
+    ex.: {"uc_codigo": "in.(a,b,c)"}) — só atualiza, nunca insere. Usar em vez de
+    `upsert` quando o payload não tem todas as colunas NOT NULL da tabela (upsert
+    parcial falha: o Postgres valida a linha candidata a INSERT antes de checar
+    o ON CONFLICT, então colunas omitidas violam NOT NULL mesmo se a linha já existir)."""
+    url, key = _config()
+    headers = _headers(key, prefer="return=minimal")
+    resp = requests.patch(f"{url}/rest/v1/{table}", headers=headers, params=filters, json=patch, timeout=30)
+    resp.raise_for_status()
 
 
 def upsert(table, rows, on_conflict):
