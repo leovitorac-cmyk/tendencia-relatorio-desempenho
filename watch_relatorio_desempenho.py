@@ -62,7 +62,10 @@ def save_state(state):
 
 
 def _only_digits(s):
-    return re.sub(r"\D", "", s)
+    # lstrip pq o PDF às vezes zero-preenche o código num campo de largura
+    # fixa (ex.: "000185456903195" pro cadastro "185456903195") — sem isso
+    # o match "só-dígitos" nunca bate (CARTROM/CHAMPAGNAT/FLORAIS, 2026-08-27).
+    return re.sub(r"\D", "", s).lstrip("0") or "0"
 
 
 NOME_STOP_WORDS = {
