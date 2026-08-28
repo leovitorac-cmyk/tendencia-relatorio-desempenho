@@ -126,9 +126,10 @@ def get_brevo_config():
 
 
 def buscar_pendentes(mes, ano):
-    """Retorna (pendentes, total_geral, totais_por_gestor) — os totais são
-    de UCs ativas (recebidas + pendentes), usados pra estatística "restam
-    X de Y (Z% enviado)" nos e-mails."""
+    """Retorna (pendentes, total_geral, totais_por_gestor, totais_por_tipo,
+    totais_por_gestor_tipo) — os totais são de UCs ativas (recebidas +
+    pendentes), usados pra estatística "restam X de Y (Z% enviado)" e pro
+    resumo de entrega Total/Variável/Fixa nos e-mails."""
     ucs = select("ucs_gestor", filters={"ativo": "eq.true"})
     recebidos = select(
         "relatorios_recebidos",
@@ -137,16 +138,21 @@ def buscar_pendentes(mes, ano):
     por_uc = {r["uc_codigo"]: r for r in recebidos}
 
     totais_por_gestor = defaultdict(int)
+    totais_por_tipo = defaultdict(int)
+    totais_por_gestor_tipo = defaultdict(lambda: defaultdict(int))
     pendentes = []
     for uc in ucs:
+        tipo = tipo_cobranca_label(uc)
         totais_por_gestor[uc["gestor_email"]] += 1
+        totais_por_tipo[tipo] += 1
+        totais_por_gestor_tipo[uc["gestor_email"]][tipo] += 1
         existente = por_uc.get(uc["uc_codigo"])
         if existente and existente.get("recebido"):
             continue
         uc = dict(uc)
         uc["_solicitacao_existente"] = existente.get("solicitacao_bubble_id") if existente else None
         pendentes.append(uc)
-    return pendentes, len(ucs), totais_por_gestor
+    return pendentes, len(ucs), totais_por_gestor, totais_por_tipo, totais_por_gestor_tipo
 
 
 # Mesma identidade do brandbook (branding/brandbook.md) e do template usado
@@ -245,37 +251,30 @@ def stats_texto(pendente, total):
     return f"restam {pendente} de {total} UC(s) ({pct_recebido:.0f}% enviado, {pct_pendente:.0f}% faltando)"
 
 
-TIPO_PLURAL = {
-    "Variável": "variáveis",
-    "Fixa": "fixas",
-    "Híbrida": "híbridas",
-    "Sem custo definido": "sem custo definido",
-    "Não informado": "não informadas",
-}
+def stats_entrega_texto(label, pendente, total):
+    """"Label: X de Y (P% entregue, Q% pendente)" — 1 linha do resumo de
+    entrega (pedido do Leo 2026-08-27, reformulação do resumo anterior:
+    agora fala em "entregue" em vez de "restam", mais direto)."""
+    entregues = total - pendente
+    pct_entregue = (entregues / total * 100) if total else 0
+    pct_pendente = 100 - pct_entregue
+    return f"{label}: {entregues} de {total} ({pct_entregue:.0f}% entregue, {pct_pendente:.0f}% pendente)"
 
 
-def stats_tipo_texto(ucs_pendentes):
-    """"X são variáveis (P%), Y são fixas (P%)..." — pedido do Leo 2026-08-27
-    pra já no título/heading do email deixar claro quanto do pendente é
-    variável (prioridade, só fatura quando o relatório sai) vs fixo (fatura
-    numa data fixa de qualquer jeito). % sobre o total de pendentes do
-    próprio email (não sobre as 810 UCs ativas). Só entram tipos com pelo
-    menos 1 UC, na mesma ordem de prioridade de ORDEM_TIPO — nenhuma UC fica
-    de fora da contagem, mesmo "sem custo definido"/"não informado"."""
-    total = len(ucs_pendentes)
-    if not total:
-        return ""
-    contagem = Counter(tipo_cobranca_label(uc) for uc in ucs_pendentes)
-    partes = [
-        f"{contagem[tipo]} são {TIPO_PLURAL[tipo]} ({contagem[tipo] / total * 100:.0f}%)"
-        for tipo in ORDEM_TIPO
-        if contagem.get(tipo)
-    ]
-    if len(partes) == 1:
-        frase = partes[0]
-    else:
-        frase = ", ".join(partes[:-1]) + " e " + partes[-1]
-    return f"Destes pendentes, {frase}."
+def resumo_entrega_html(total_geral, pendente_geral, totais_tipo, pendentes_tipo):
+    """3 linhas no heading do email: Total, Variável, Fixa — cada uma com
+    contagem absoluta e %. Variável/Fixa aparecem sempre, mesmo com 0
+    entregue/0 pendente, pra não sumir uma categoria da leitura. Híbrida e
+    "sem custo definido" não ganham linha própria (pedido do Leo foi só
+    Total/Variável/Fixa) mas continuam contados dentro do Total."""
+    linhas = [stats_entrega_texto("Total de relatórios entregues", pendente_geral, total_geral)]
+    for tipo, label in (("Variável", "Relatórios variáveis entregues"), ("Fixa", "Relatórios fixos entregues")):
+        linhas.append(stats_entrega_texto(label, pendentes_tipo.get(tipo, 0), totais_tipo.get(tipo, 0)))
+    return (
+        '<div style="margin-top:10px;font-size:12.5px;font-weight:400;color:#475467;line-height:1.8;">'
+        + "<br/>".join(linhas)
+        + "</div>"
+    )
 
 
 def montar_secao_gestor_html(gestor_nome, ucs_pendentes, total_gestor):
@@ -329,10 +328,11 @@ def enviar_email(to_nome, to_email, assunto, corpo_html):
     return resp.json()
 
 
-def enviar_email_brevo(gestor_nome, gestor_email, ucs_pendentes, mes, ano, total_gestor):
+def enviar_email_brevo(gestor_nome, gestor_email, ucs_pendentes, mes, ano, total_gestor, totais_gestor_tipo):
+    pendentes_tipo = Counter(tipo_cobranca_label(uc) for uc in ucs_pendentes)
     heading = (
-        f"Olá, {gestor_nome}! {stats_texto(len(ucs_pendentes), total_gestor)} "
-        f"de relatório de {mes:02d}/{ano}. {stats_tipo_texto(ucs_pendentes)}"
+        f"Olá, {gestor_nome}! Relatório de {mes:02d}/{ano}."
+        + resumo_entrega_html(total_gestor, len(ucs_pendentes), totais_gestor_tipo, pendentes_tipo)
     )
     html = email_template("Relatório pendente", heading, montar_corpo_por_tipo_html(ucs_pendentes))
     return enviar_email(
@@ -342,12 +342,13 @@ def enviar_email_brevo(gestor_nome, gestor_email, ucs_pendentes, mes, ano, total
     )
 
 
-def enviar_email_consolidado_brevo(to_nome, to_email, por_gestor, mes, ano, totais_por_gestor, total_geral):
+def enviar_email_consolidado_brevo(to_nome, to_email, por_gestor, mes, ano, totais_por_gestor, total_geral, totais_por_tipo):
     total_pendente = sum(len(ucs) for ucs in por_gestor.values())
     todas_ucs_pendentes = [uc for ucs in por_gestor.values() for uc in ucs]
+    pendentes_tipo = Counter(tipo_cobranca_label(uc) for uc in todas_ucs_pendentes)
     heading = (
-        f"Olá, {to_nome}! Resumo consolidado — {stats_texto(total_pendente, total_geral)} "
-        f"pendentes em {mes:02d}/{ano}, por gestor. {stats_tipo_texto(todas_ucs_pendentes)}"
+        f"Olá, {to_nome}! Resumo consolidado — {mes:02d}/{ano}, por gestor."
+        + resumo_entrega_html(total_geral, total_pendente, totais_por_tipo, pendentes_tipo)
     )
     corpo = TEXTO_EXPLICATIVO_TIPO + "".join(
         montar_secao_gestor_html(ucs[0]["gestor_nome"], ucs, totais_por_gestor.get(gestor_email, len(ucs)))
@@ -361,7 +362,7 @@ def enviar_email_consolidado_brevo(to_nome, to_email, por_gestor, mes, ano, tota
     )
 
 
-def enviar_email_financeiro_brevo(to_nome, to_email, pendentes, mes, ano, total_geral):
+def enviar_email_financeiro_brevo(to_nome, to_email, pendentes, mes, ano, total_geral, totais_por_tipo):
     """Igual ao consolidado dos coordenadores, mas SEM separar por gestor —
     Julio/financeiro só precisam saber quais clientes estão pendentes, não
     quem é o gestor responsável (decisão do Leo, 2026-08-20). Separado por
@@ -370,9 +371,10 @@ def enviar_email_financeiro_brevo(to_nome, to_email, pendentes, mes, ano, total_
     essa info (coluna "Custo Serviço", nunca importada pro Supabase até
     então — ver `import_custo_servico.py`)."""
     corpo = montar_corpo_por_tipo_html(pendentes)
+    pendentes_tipo = Counter(tipo_cobranca_label(uc) for uc in pendentes)
     heading = (
-        f"Olá, {to_nome}! {stats_texto(len(pendentes), total_geral)} "
-        f"de relatório de desempenho em {mes:02d}/{ano}. {stats_tipo_texto(pendentes)}"
+        f"Olá, {to_nome}! Relatório de desempenho — {mes:02d}/{ano}."
+        + resumo_entrega_html(total_geral, len(pendentes), totais_por_tipo, pendentes_tipo)
     )
     html = email_template("Relatório pendente", heading, corpo)
     return enviar_email(
@@ -434,7 +436,7 @@ def run(env_name="test", turno="manha", force=False, dry_run=False):
 
     mes = today.month - 1 or 12
     ano = today.year if today.month > 1 else today.year - 1
-    pendentes, total_geral, totais_por_gestor = buscar_pendentes(mes, ano)
+    pendentes, total_geral, totais_por_gestor, totais_por_tipo, totais_por_gestor_tipo = buscar_pendentes(mes, ano)
     log.info("%d UCs pendentes de relatório em %02d/%d (turno=%s)", len(pendentes), mes, ano, turno)
 
     if not pendentes:
@@ -460,7 +462,11 @@ def run(env_name="test", turno="manha", force=False, dry_run=False):
             )
             continue
 
-        enviar_email_brevo(gestor_nome, gestor_email, ucs_pendentes, mes, ano, totais_por_gestor.get(gestor_email, len(ucs_pendentes)))
+        enviar_email_brevo(
+            gestor_nome, gestor_email, ucs_pendentes, mes, ano,
+            totais_por_gestor.get(gestor_email, len(ucs_pendentes)),
+            totais_por_gestor_tipo.get(gestor_email, {}),
+        )
         total_notificados += 1
 
         rows_upsert = []
@@ -486,7 +492,7 @@ def run(env_name="test", turno="manha", force=False, dry_run=False):
                 coord["nome"], coord["email"], len(por_gestor), sum(len(u) for u in por_gestor.values()),
             )
             continue
-        enviar_email_consolidado_brevo(coord["nome"], coord["email"], por_gestor, mes, ano, totais_por_gestor, total_geral)
+        enviar_email_consolidado_brevo(coord["nome"], coord["email"], por_gestor, mes, ano, totais_por_gestor, total_geral, totais_por_tipo)
         total_consolidados += 1
 
     total_financeiro = 0
@@ -497,7 +503,7 @@ def run(env_name="test", turno="manha", force=False, dry_run=False):
                 dest["nome"], dest["email"], len(pendentes),
             )
             continue
-        enviar_email_financeiro_brevo(dest["nome"], dest["email"], pendentes, mes, ano, total_geral)
+        enviar_email_financeiro_brevo(dest["nome"], dest["email"], pendentes, mes, ano, total_geral, totais_por_tipo)
         total_financeiro += 1
 
     log.info(
