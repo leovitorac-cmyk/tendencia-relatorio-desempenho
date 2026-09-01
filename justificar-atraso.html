@@ -142,7 +142,7 @@
       </div>
 
       <label class="field-label" for="motivo-select">Motivo do atraso</label>
-      <select id="motivo-select" class="motivo-select">
+      <select id="motivo-select" class="motivo-select" onchange="alternarOutro()">
         <option value="" disabled selected>Selecione um motivo…</option>
         <option>Inscrição estadual baixada</option>
         <option>NF com volume divergente da fatura de energia</option>
@@ -151,7 +151,13 @@
         <option>Cliente não recebeu fatura</option>
         <option>Distribuidora não emitiu a fatura</option>
         <option>Cliente não enviou a fatura/não disponibilizou dados de acesso</option>
+        <option>Outro</option>
       </select>
+
+      <div id="outro-wrap" class="hidden">
+        <label class="field-label" for="outro-texto">Descreva o motivo</label>
+        <textarea id="outro-texto" class="motivo-select" rows="3" style="resize:vertical;appearance:auto;background-image:none;" placeholder="Explique o motivo do atraso…"></textarea>
+      </div>
 
       <button class="btn-primary" id="btn-concluir" onclick="responder()">Concluir e ir pra próxima</button>
     </div>
@@ -215,7 +221,15 @@
     document.getElementById("uc-meta").textContent =
       "UC " + item.uc_codigo + " · relatório de " + String(item.mes).padStart(2, "0") + "/" + item.ano;
     document.getElementById("motivo-select").value = "";
+    document.getElementById("outro-texto").value = "";
+    document.getElementById("outro-wrap").classList.add("hidden");
     document.getElementById("btn-concluir").disabled = false;
+  }
+
+  function alternarOutro() {
+    var ehOutro = document.getElementById("motivo-select").value === "Outro";
+    document.getElementById("outro-wrap").classList.toggle("hidden", !ehOutro);
+    if (ehOutro) { document.getElementById("outro-texto").focus(); }
   }
 
   function carregarProximo() {
@@ -239,6 +253,14 @@
     if (!motivo) {
       document.getElementById("motivo-select").focus();
       return;
+    }
+    if (motivo === "Outro") {
+      var texto = document.getElementById("outro-texto").value.trim();
+      if (!texto) {
+        document.getElementById("outro-texto").focus();
+        return;
+      }
+      motivo = texto;
     }
     var btn = document.getElementById("btn-concluir");
     btn.disabled = true;
