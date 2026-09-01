@@ -41,6 +41,10 @@ MAX_LINHA_IDENTIFICACAO = 150  # linha de identificação de UC é curta; descar
 MIN_TAMANHO_CODIGO = 5  # descarta abreviações alfanuméricas tipo "I5" (perfil de carga)
 MIN_TAMANHO_CODIGO_NUMERICO = 3  # UC 100% numérica pode ser bem curta de verdade
 CNPJ_SHAPE = re.compile(r"^\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}$")  # linha pode citar o CNPJ do cliente à parte, isso não é UC
+CNPJ_SHAPE_CRU = re.compile(r"^\d{14}$")  # mesmo CNPJ, mas sem pontuação (ex.: "63347397003470") — bug real
+# descoberto 2026-09-01 (B CIRILO ALBINO): sem essa checagem o CNPJ cru vira "código" candidato
+# (14 dígitos passa em MIN_TAMANHO_CODIGO_NUMERICO) ou sobra dentro do "nome" e atrapalha o
+# match por razão social. UC real nunca tem exatamente 14 dígitos nas ~800 cadastradas hoje.
 
 
 def _looks_like_code(segment):
@@ -52,7 +56,7 @@ def _looks_like_code(segment):
     verdade; abreviação alfanumérica tipo "I5"/"A4" não passa de 2
     caracteres — mínimo mais baixo só pra dígito puro não reabre esse
     problema."""
-    if CNPJ_SHAPE.match(segment):
+    if CNPJ_SHAPE.match(segment) or CNPJ_SHAPE_CRU.match(segment):
         return False
     if " " in segment or not any(c.isdigit() for c in segment):
         return False
@@ -61,21 +65,30 @@ def _looks_like_code(segment):
     return len(segment) >= MIN_TAMANHO_CODIGO
 
 
-CODE_CITY_GLUED_PATTERN = re.compile(r"^([\w./]+?)-([A-ZÀ-Ü][A-ZÀ-Ü\s]*)$")
+CODE_CITY_GLUED_PATTERN = re.compile(r"^([\w./]+(?:-\d+)?)-\s*([A-ZÀ-Ü][A-ZÀ-Ü\s]*)$")
 
 
 def _strip_glued_city_suffix(segment):
-    """Alguns PDFs colam a UC direto no nome da cidade sem espaço em volta
-    do hífen (ex.: "204803095-VARGEM GRANDE PAULISTA", "200964261-COTIA")
-    — diferente de hífen que É parte do código (ex. "0616541-9", dígito
-    verificador — sempre número dos 2 lados). Se o que vem depois do hífen
-    começa com letra maiúscula, é nome de lugar, não parte do código.
+    """Alguns PDFs colam a UC direto no nome da cidade/filial sem espaço em
+    volta do hífen (ex.: "204803095-VARGEM GRANDE PAULISTA",
+    "200964261-COTIA") — diferente de hífen que É parte do código (ex.
+    "0616541-9", dígito verificador — sempre número dos 2 lados). Se o que
+    vem depois do hífen começa com letra maiúscula, é nome de lugar, não
+    parte do código.
 
     Bug real descoberto 2026-08-20: cidade de 1 palavra só ("COTIA") ainda
     colava com o código mas casava por acidente no fallback só-dígitos;
     cidade de 2+ palavras ("VARGEM GRANDE PAULISTA") tinha espaço, falhava
     `_looks_like_code` e a linha inteira era descartada — UC sumia sem
-    nenhum log, nem virava "desconhecida"."""
+    nenhum log, nem virava "desconhecida".
+
+    Bug real descoberto 2026-09-01 (WAVE TELECOM, filial DJALMA): o próprio
+    código tem dígito verificador com hífen ("0555468-3") E ainda vem colado
+    ao nome da filial só com espaço DEPOIS do hífen de cola, não antes
+    ("0555468-3- DJALMA") — o regex antigo só previa 1 hífen total no
+    segmento (o de cola) e um espaço zero. Agora aceita opcionalmente mais
+    um "-dígitos" (o verificador) antes do hífen de cola, e 0+ espaços logo
+    depois dele."""
     m = CODE_CITY_GLUED_PATTERN.match(segment)
     if m:
         return m.group(1)
@@ -170,7 +183,7 @@ def extract_report(file_path):
         if code not in seen:
             seen.add(code)
             ucs.append(code)
-            cnpj = next((s for s in segments if CNPJ_SHAPE.match(s)), None)
+            cnpj = next((s for s in segments if CNPJ_SHAPE.match(s) or CNPJ_SHAPE_CRU.match(s)), None)
             nome_segs = [s for s in segments if s != code and s != cnpj]
             nome = " ".join(nome_segs) if nome_segs else None
             identificacoes.append({"uc": code, "nome": nome, "cnpj": cnpj})

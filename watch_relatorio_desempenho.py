@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "email"))
@@ -77,18 +78,31 @@ NOME_STOP_WORDS = {
 def _tokens_nome(nome):
     if not nome:
         return frozenset()
-    s = re.sub(r"[.\-,/]", " ", nome.upper())
+    s = unicodedata.normalize("NFKD", nome.upper())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"[.\-,/&]", " ", s)
     return frozenset(w for w in s.split() if w not in NOME_STOP_WORDS)
 
 
-def match_por_nome(nome, nomes_idx, min_score=0.6):
+def match_por_nome(nome, nomes_idx, min_score=0.8):
     """Fallback final: casa por razão social quando nem código exato, nem
     parte de composto, nem só-dígitos bateram. Existe porque a distribuidora
     às vezes renumera a conta/UC do cliente e o PDF passa a trazer um código
     totalmente diferente do cadastrado em `ucs_gestor` (não é diferença de
     formatação — é outro número mesmo) — mas o nome do cliente continua
-    igual. Jaccard sobre tokens (sem stopword tipo LTDA/DE/DA); score
-    mínimo 0.6 evita casar clientes homônimos parcialmente."""
+    igual.
+
+    Score = contenção do nome CADASTRADO (lado curto, ex. "BLUE LOGISTICA")
+    dentro do nome da LINHA do PDF (ex. "BLUE LOGISTICA INTEGRADA EIRE") —
+    mesma convenção usada no fallback por CNPJ. Antes era Jaccard simétrico
+    (interseção / MAIOR dos dois lados), que MATEMATICAMENTE nunca passava
+    de 0.6 quando o cadastro tinha só 2 tokens e a linha do PDF trazia o
+    nome completo/razão social (4+ tokens) — bug real descoberto
+    2026-09-01 (BLUE LOGISTICA, B CIRILO ALBINO, e outros: nome cadastrado
+    abreviado 100% contido na linha do PDF, mas marcado "sem match" e
+    ficando pendente por engano). Score mínimo mais alto (0.8, era 0.6)
+    porque a nova fórmula sempre dá 1.0 pra match verdadeiro — ainda
+    protege contra homônimo parcial."""
     alvo = _tokens_nome(nome)
     if not alvo:
         return None, 0.0
@@ -96,7 +110,7 @@ def match_por_nome(nome, nomes_idx, min_score=0.6):
     for tk, uc in nomes_idx:
         if not tk:
             continue
-        score = len(alvo & tk) / max(len(alvo), len(tk))
+        score = len(alvo & tk) / len(tk)
         if score > melhor_score:
             melhor_score, melhor_uc = score, uc
     if melhor_score >= min_score:
@@ -118,8 +132,12 @@ def match_por_nome_grupo(nome, grupos_por_nome, min_score=0.75):
     mês. Pode super-creditar (empresa manda relatório de só 1 filial mas
     creditamos todas) — troca-off aceito (Leo, 2026-08-20): preferir isso a
     marcar como pendente um cliente que claramente mandou o relatório
-    (assunto do email prova isso). Score mínimo mais alto (0.75) que o
-    fallback por linha porque aqui não há como conferir por UC individual."""
+    (assunto do email prova isso).
+
+    Score = contenção do nome cadastrado no assunto (mesma correção de
+    2026-09-01 do `match_por_nome` acima — Jaccard simétrico antigo nunca
+    passava quando o assunto trazia razão social completa e o cadastro só
+    tinha apelido curto, ex. "AABB SE"/"ASSOCIACAO CRISTA MOCOS SP")."""
     alvo = _tokens_nome(nome)
     if not alvo:
         return None, 0.0
@@ -127,7 +145,7 @@ def match_por_nome_grupo(nome, grupos_por_nome, min_score=0.75):
     for tk in grupos_por_nome:
         if not tk:
             continue
-        score = len(alvo & tk) / max(len(alvo), len(tk))
+        score = len(alvo & tk) / len(tk)
         if score > melhor_score:
             melhor_score, melhor_tk = score, tk
     if melhor_score >= min_score:
@@ -286,7 +304,14 @@ def run(max_results=50, dry_run=False):
                     "gmail_message_id": msg_id,
                 })
 
-            if nao_resolvidos:
+            # Dispara também quando `all_identificacoes` veio TOTALMENTE vazio (nenhuma linha
+            # "nome - código" achada no PDF) — bug real descoberto 2026-09-01 (CASAS DO OLEO,
+            # distribuidora com layout tipo dashboard sem nenhum código no texto): antes esse
+            # fallback só rodava se `nao_resolvidos` tivesse item, o que exige que o loop acima
+            # tenha rodado pelo menos 1 vez — se a extração não achou NENHUMA identificação, o
+            # loop nunca roda, `nao_resolvidos` fica vazio e o fallback por assunto (que resolveria
+            # o caso trivialmente, já que o assunto tem o nome do cliente) nunca era tentado.
+            if nao_resolvidos or not all_identificacoes:
                 subject_cliente = extract_subject_cliente(subject)
                 ja_gravados = {r["uc_codigo"] for r in rows}
                 grupo_ucs, score_grupo = match_por_nome_grupo(subject_cliente, conhecidas_por_grupo)
@@ -304,7 +329,8 @@ def run(max_results=50, dry_run=False):
                             "gmail_message_id": msg_id,
                         })
                     log.warning(
-                        "msg=%s assunto-cliente=%r SEM MATCH POR LINHA (nomes de filial no PDF: %s) — "
+                        "msg=%s assunto-cliente=%r SEM MATCH POR LINHA (nomes de filial no PDF ou "
+                        "nenhuma identificação extraída: %s) — "
                         "casou por NOME DO ASSUNTO com %d UC(s) cadastradas dessa empresa (score=%.2f). "
                         "Creditando todas — sem CNPJ por UC não dá pra saber qual linha é qual filial.",
                         msg_id, subject_cliente, [i.get("nome") for i in nao_resolvidos], len(grupo_ucs), score_grupo,
