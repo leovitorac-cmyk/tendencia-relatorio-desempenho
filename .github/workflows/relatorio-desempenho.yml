@@ -37,6 +37,20 @@ jobs:
           printf '%s' '${{ secrets.GMAIL_CLIENT_SECRET_JSON }}' > email/client_secret.json
           printf '%s' '${{ secrets.GMAIL_TOKEN_JSON }}' > email/token.json
 
+      # Sem isto o runner é efêmero e o watcher reprocessa as mesmas ~500 mensagens
+      # do zero a cada rodada, travando sempre no mesmo ponto por rate limit do Gmail
+      # antes de progredir (bug real, descoberto 2026-09-08 — mes 08/2026 zerado,
+      # mes 07/2026 parado desde 2026-08-20 apesar do cron rodando normalmente).
+      # Key único por run (cache é imutável) + restore-keys por prefixo pra sempre
+      # puxar o mais recente salvo.
+      - name: Restaurar estado de mensagens já processadas
+        uses: actions/cache@v4
+        with:
+          path: email/downloads/processed_relatorio.json
+          key: relatorio-state-${{ github.run_id }}
+          restore-keys: |
+            relatorio-state-
+
       - name: Verificar novos relatorios no Gmail
         run: python3 watch_relatorio_desempenho.py --max 500
 

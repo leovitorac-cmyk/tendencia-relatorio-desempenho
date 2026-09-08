@@ -31,6 +31,8 @@ import sys
 import unicodedata
 from datetime import datetime, timezone
 
+from googleapiclient.errors import HttpError
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "email"))
 
 from gmail_client import download_attachments, get_message, get_service, list_messages  # noqa: E402
@@ -225,11 +227,19 @@ def run(max_results=50, dry_run=False):
             continue
 
         novos += 1
-        msg = get_message(service, msg_id)
-        headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
-        subject = headers.get("Subject", "")
-
-        saved = download_attachments(service, msg_id, msg["payload"], DOWNLOAD_DIR, subject)
+        try:
+            msg = get_message(service, msg_id)
+            headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+            subject = headers.get("Subject", "")
+            saved = download_attachments(service, msg_id, msg["payload"], DOWNLOAD_DIR, subject)
+        except HttpError as e:
+            if e.resp.status == 403 and "rateLimitExceeded" in str(e):
+                # Quota do Gmail (Units/min) estourada no meio do lote — state já persistido
+                # (cache do GitHub Actions) pras mensagens processadas até aqui; a próxima
+                # rodada (cron 30min) retoma dessas em diante em vez de reprocessar tudo.
+                log.warning("msg=%s rate limit do Gmail atingido — encerrando rodada, retoma na próxima", msg_id)
+                break
+            raise
         if not saved:
             log.warning("msg=%s assunto=%r sem anexo — pulando", msg_id, subject)
             state[msg_id] = {"status": "skipped_no_attachment", "subject": subject}
