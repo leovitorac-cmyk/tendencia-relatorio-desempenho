@@ -354,6 +354,25 @@ def run(max_results=50, dry_run=False):
                         )
 
             if rows:
+                # Bug real descoberto 2026-09-08 (PIRACICABA CARNES): 2 códigos crus
+                # diferentes da mesma mensagem podem casar por razão social no MESMO
+                # cadastro (ambiguidade do match por nome) — 2 linhas com a mesma chave
+                # (uc_codigo,mes,ano) no mesmo upsert faz o Postgres estourar "ON CONFLICT
+                # DO UPDATE command cannot affect row a second time" (500), derrubando a
+                # mensagem INTEIRA sem gravar nada. Dedup por chave antes do upsert.
+                deduped = {}
+                for r in rows:
+                    chave = (r["uc_codigo"], r["mes"], r["ano"])
+                    if chave in deduped:
+                        log.warning(
+                            "msg=%s UC canônico %s (mes=%s/%s) recebeu 2+ códigos crus diferentes "
+                            "casando por nome no mesmo cadastro — mantendo só 1 (ambiguidade no "
+                            "match por nome, revisar ucs_gestor)",
+                            msg_id, r["uc_codigo"], r["mes"], r["ano"],
+                        )
+                        continue
+                    deduped[chave] = r
+                rows = list(deduped.values())
                 upsert("relatorios_recebidos", rows, on_conflict="uc_codigo,mes,ano")
                 ucs_ok += len(rows)
 
