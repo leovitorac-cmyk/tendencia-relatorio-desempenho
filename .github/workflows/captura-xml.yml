@@ -17,8 +17,8 @@ name: Captura de XMLs (Outlook)
 
 on:
   # LIGAR SÓ DEPOIS do ensaio manual ter dado certo (tira o # das duas linhas abaixo):
-  # schedule:
-  #   - cron: "*/30 * * * *"
+   schedule:
+     - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       modo:
