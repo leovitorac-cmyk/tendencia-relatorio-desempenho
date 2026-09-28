@@ -1,0 +1,64 @@
+# DSR-1.7 · subtarefa 1 · RASCUNHO: não publicado.
+# Roda o leitor de XMLs (captura/leitor_outlook.py) sozinho, a cada 30 minutos: lê a caixa dos XMLs pelo
+# Microsoft Graph e grava as NFs em captura_nf (Supabase czqvenpkfsbepggdktfn, produção).
+#
+# Onde vai: repo de produção `tendencia-relatorio-desempenho`, arquivo .github/workflows/captura-xml.yml.
+# Os scripts vão para a pasta captura_xml/ do mesmo repo (o leitor importa o graph_teste.py da mesma pasta).
+# A marca de corte fica no Supabase (captura_emails_processados), então o runner efêmero recomeça de onde parou.
+#
+# Segurança:
+#  - O GitHub só mostra o botão "Run workflow" e só agenda workflows que já estão na branch padrão (main).
+#    Na branch de trabalho NADA dispara. Por isso o agendamento (cron) abaixo está COMENTADO na primeira
+#    versão: entra em main só com o disparo manual, testa-se em modo ensaio, e só depois o cron é ligado.
+#  - O disparo manual é ensaio por padrão (só lista, não grava). Só o agendamento e a escolha "enviar" gravam.
+#  - Nenhum segredo vai no código: tudo vem dos secrets do repositório.
+
+name: Captura de XMLs (Outlook)
+
+on:
+  # LIGAR SÓ DEPOIS do ensaio manual ter dado certo (tira o # das duas linhas abaixo):
+  # schedule:
+  #   - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "ensaio = só lista e extrai, não grava; enviar = GRAVA em produção (limite 200 e-mails)"
+        required: false
+        default: ensaio
+        type: choice
+        options:
+          - ensaio
+          - enviar
+
+# Uma execução por vez: se a anterior demorar, a próxima espera em vez de as duas gravarem juntas.
+concurrency:
+  group: captura-xml
+  cancel-in-progress: false
+
+jobs:
+  captura:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MS_DSR_TENANT_ID: ${{ secrets.MS_DSR_TENANT_ID }}
+      MS_DSR_CLIENT_ID: ${{ secrets.MS_DSR_CLIENT_ID }}
+      MS_DSR_CLIENT_SECRET: ${{ secrets.MS_DSR_CLIENT_SECRET }}
+      MS_DSR_MAILBOX: ${{ secrets.MS_DSR_MAILBOX }}
+      SUPABASE_RELATORIO_URL: ${{ secrets.SUPABASE_RELATORIO_URL }}
+      SUPABASE_RELATORIO_SERVICE_KEY: ${{ secrets.SUPABASE_RELATORIO_SERVICE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+
+      - name: Ler a caixa dos XMLs
+        env:
+          MODO: ${{ github.event_name == 'schedule' && 'enviar' || inputs.modo }}  # agendado grava; manual segue a escolha (padrão: ensaio)
+        run: |
+          if [ "$MODO" = "enviar" ]; then
+            python3 captura_xml/leitor_outlook.py --enviar --limite 200
+          else
+            python3 captura_xml/leitor_outlook.py --ensaio --limite 20
+          fi
