@@ -40,7 +40,7 @@ def ler_env():
     # O arquivo continua valendo primeiro; o ambiente só completa o que faltar.
     for chave in (*CHAVES, "SUPABASE_RELATORIO_URL", "SUPABASE_RELATORIO_SERVICE_KEY"):
         if not env.get(chave) and os.environ.get(chave):
-            env[chave] = os.environ[chave]
+            env[chave] = os.environ[chave].strip()
     faltando = [c for c in CHAVES if not env.get(c)]
     if faltando:
         sys.exit(f"Faltam no .env.local ou no ambiente: {', '.join(faltando)}")
