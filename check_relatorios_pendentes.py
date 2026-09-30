@@ -53,6 +53,18 @@ BUBBLE_BASE_URLS = {
 DIAS_CHECAGEM_BASE = {20, 22, 25, 26, 27, 28, 29, 30, 31}
 DIA_CRIACAO_CARD = 20  # dia (não ajustado) — card só na rodada de manhã desse dia
 
+# Regra nova de criação de card (DSR-3.3) — desligada por padrão.
+# Com CRM_REGRA_NOVA=1, só cria card para UCs com fatura e NF já recebidas.
+# CRM_GATILHO_DIA: número do dia do mês a partir do qual criar cards (vazio = assim que chegar).
+# CRM_COMPETENCIA: "YYYY-MM" da competência de referência (vazio = mês anterior).
+CRM_REGRA_NOVA = os.getenv("CRM_REGRA_NOVA", "0") == "1"
+_CRM_GATILHO_DIA_STR = os.getenv("CRM_GATILHO_DIA", "").strip()
+CRM_GATILHO_DIA = int(_CRM_GATILHO_DIA_STR) if _CRM_GATILHO_DIA_STR.isdigit() else None
+CRM_COMPETENCIA = os.getenv("CRM_COMPETENCIA", "").strip()  # "YYYY-MM" ou vazio
+
+# nf_status da v_status_uc que contam como "NF ok" para criar card
+NF_STATUS_OK = {"recebida", "nao_se_aplica"}
+
 
 def _proximo_dia_util(d):
     while d.weekday() >= 5:  # 5=sábado, 6=domingo
@@ -74,6 +86,36 @@ def _dia_efetivo(ano, mes, dia_original):
 
 def _dias_checagem_efetivos(ano, mes):
     return {d for d in (_dia_efetivo(ano, mes, dia) for dia in DIAS_CHECAGEM_BASE) if d}
+
+
+def _competencia_alvo(today):
+    """Retorna (mes, ano) da competência de referência.
+    Usa CRM_COMPETENCIA se definida (YYYY-MM); senão mês anterior."""
+    if CRM_COMPETENCIA:
+        try:
+            ano_str, mes_str = CRM_COMPETENCIA.split("-")
+            return int(mes_str), int(ano_str)
+        except (ValueError, AttributeError):
+            log.warning("CRM_COMPETENCIA inválida ('%s') — usando mês anterior", CRM_COMPETENCIA)
+    mes = today.month - 1 or 12
+    ano = today.year if today.month > 1 else today.year - 1
+    return mes, ano
+
+
+def _regra_nova_cria_hoje(today):
+    """Com CRM_REGRA_NOVA=1: True se hoje é dia de criar cards.
+    CRM_GATILHO_DIA definido → só a partir daquele dia útil do mês.
+    CRM_GATILHO_DIA vazio → cria em qualquer dia de checagem."""
+    if CRM_GATILHO_DIA is not None:
+        gatilho_efetivo = _dia_efetivo(today.year, today.month, CRM_GATILHO_DIA)
+        return gatilho_efetivo is not None and today >= gatilho_efetivo
+    return True
+
+
+def buscar_status_uc(mes, ano):
+    """Retorna dict uc_codigo → row de v_status_uc para o mes/ano."""
+    rows = select("v_status_uc", filters={"mes": "eq.%d" % mes, "ano": "eq.%d" % ano})
+    return {r["uc_codigo"]: r for r in rows}
 
 # Coordenadores — recebem, em todo dia de checagem, 1 e-mail consolidado com
 # as pendências de TODOS os gestores (separado por seção por gestor). Diogo
@@ -434,8 +476,7 @@ def run(env_name="test", turno="manha", force=False, dry_run=False):
         )
         return
 
-    mes = today.month - 1 or 12
-    ano = today.year if today.month > 1 else today.year - 1
+    mes, ano = _competencia_alvo(today)
     pendentes, total_geral, totais_por_gestor, totais_por_tipo, totais_por_gestor_tipo = buscar_pendentes(mes, ano)
     log.info("%d UCs pendentes de relatório em %02d/%d (turno=%s)", len(pendentes), mes, ano, turno)
 
@@ -446,20 +487,45 @@ def run(env_name="test", turno="manha", force=False, dry_run=False):
     for uc in pendentes:
         por_gestor[uc["gestor_email"]].append(uc)
 
-    dia_20_efetivo = _dia_efetivo(today.year, today.month, DIA_CRIACAO_CARD)
-    cria_solicitacao = turno == "manha" and today == dia_20_efetivo
+    if CRM_REGRA_NOVA:
+        cria_solicitacao = turno == "manha" and _regra_nova_cria_hoje(today)
+    else:
+        dia_20_efetivo = _dia_efetivo(today.year, today.month, DIA_CRIACAO_CARD)
+        cria_solicitacao = turno == "manha" and today == dia_20_efetivo
+
+    # Regra nova: carrega v_status_uc uma vez para filtrar fatura+NF por UC
+    if CRM_REGRA_NOVA and cria_solicitacao:
+        status_uc = buscar_status_uc(mes, ano)
+    else:
+        status_uc = {}
+
     total_notificados = total_solicitacoes = 0
 
     for gestor_email, ucs_pendentes in por_gestor.items():
         gestor_nome = ucs_pendentes[0]["gestor_nome"]
 
         if dry_run:
-            log.info(
-                "[DRY-RUN] notificaria %s <%s> sobre %d UC(s) (%s): %s",
-                gestor_nome, gestor_email, len(ucs_pendentes),
-                "email + Solicitacao" if cria_solicitacao else "só email",
-                [uc["uc_codigo"] for uc in ucs_pendentes],
-            )
+            if CRM_REGRA_NOVA and cria_solicitacao:
+                ucs_com_card = [
+                    uc for uc in ucs_pendentes
+                    if not uc.get("_solicitacao_existente")
+                    and status_uc.get(uc["uc_codigo"], {}).get("fatura_recebida")
+                    and status_uc.get(uc["uc_codigo"], {}).get("nf_status") in NF_STATUS_OK
+                ]
+                log.info(
+                    "[DRY-RUN] notificaria %s <%s> sobre %d UC(s); "
+                    "regra nova: %d ganhariam card (fatura+NF): %s",
+                    gestor_nome, gestor_email, len(ucs_pendentes),
+                    len(ucs_com_card),
+                    [uc["uc_codigo"] for uc in ucs_com_card],
+                )
+            else:
+                log.info(
+                    "[DRY-RUN] notificaria %s <%s> sobre %d UC(s) (%s): %s",
+                    gestor_nome, gestor_email, len(ucs_pendentes),
+                    "email + Solicitacao" if cria_solicitacao else "só email",
+                    [uc["uc_codigo"] for uc in ucs_pendentes],
+                )
             continue
 
         enviar_email_brevo(
@@ -479,8 +545,16 @@ def run(env_name="test", turno="manha", force=False, dry_run=False):
                 "notificado_em": datetime.now(timezone.utc).isoformat(),
             }
             if cria_solicitacao and not uc.get("_solicitacao_existente"):
-                row["solicitacao_bubble_id"] = criar_solicitacao_bubble(env_name, uc, mes, ano)
-                total_solicitacoes += 1
+                if CRM_REGRA_NOVA:
+                    st = status_uc.get(uc["uc_codigo"])
+                    ok = (st is not None
+                          and st.get("fatura_recebida")
+                          and st.get("nf_status") in NF_STATUS_OK)
+                else:
+                    ok = True
+                if ok:
+                    row["solicitacao_bubble_id"] = criar_solicitacao_bubble(env_name, uc, mes, ano)
+                    total_solicitacoes += 1
             rows_upsert.append(row)
         upsert("relatorios_recebidos", rows_upsert, on_conflict="uc_codigo,mes,ano")
 
