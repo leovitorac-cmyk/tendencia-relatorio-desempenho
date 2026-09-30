@@ -1,0 +1,73 @@
+# DSR-1.7 · subtarefa 2. Depende do sql/018 (captura_execucoes, aplicado) e da batida no leitor (provada em 28/09/2026).
+# Vigia a captura de XMLs: falha (e o GitHub manda e-mail) se o leitor parou, ficou preso ou teve erro.
+#
+# Onde vai: repo de produção `tendencia-relatorio-desempenho`, .github/workflows/captura-xml-alerta.yml.
+# É um workflow SEPARADO do captura-xml.yml de propósito: se o leitor travar ou nem rodar, quem avisa é este.
+# Limite: se o próprio GitHub Actions parar de agendar tudo, este também para (não há vigia fora do GitHub).
+#
+# Falha quando (lendo a última linha de captura_execucoes):
+#   (a) não há batida na última 1 hora (leitor parado, travado ou sem rodar) ou a tabela não existe;
+#   (b) a última batida atingiu o limite de e-mails e não gravou NF nem viu XML novo (leitor preso relendo e-mails antigos);
+#   (c) a última batida teve erro.
+# Se 1 hora der alarme falso por atraso do cron do GitHub, suba MINUTOS_SEM_BATIDA para 90.
+# ORDEM: só entra em main DEPOIS do leitor já estar rodando sozinho e ter gravado ao menos uma batida; antes disso
+# ele falha de propósito (tabela vazia) e manda e-mail a cada hora. O GitHub só agenda workflows da branch padrão.
+
+name: Alerta da captura de XMLs
+
+on:
+  schedule:
+    - cron: "15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  alerta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_RELATORIO_URL: ${{ secrets.SUPABASE_RELATORIO_URL }}
+      SUPABASE_RELATORIO_SERVICE_KEY: ${{ secrets.SUPABASE_RELATORIO_SERVICE_KEY }}
+      MINUTOS_SEM_BATIDA: "60"
+    steps:
+      - name: Conferir a última batida do leitor
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.error, urllib.request
+          from datetime import datetime, timezone
+
+          url = os.environ["SUPABASE_RELATORIO_URL"].strip().rstrip("/")  # o secret pode ter quebra de linha no fim
+          chave = os.environ["SUPABASE_RELATORIO_SERVICE_KEY"].strip()
+          limite_min = int(os.environ["MINUTOS_SEM_BATIDA"])
+
+          req = urllib.request.Request(
+              f"{url}/rest/v1/captura_execucoes?select=*&order=executado_em.desc&limit=1",
+              headers={"apikey": chave, "Authorization": f"Bearer {chave}"},
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  linhas = json.load(r)
+          except urllib.error.HTTPError as e:
+              sys.exit(f"::error::Não consegui ler captura_execucoes (HTTP {e.code}). A tabela existe (sql/018)?")
+
+          if not linhas:
+              sys.exit("::error::captura_execucoes está vazia: o leitor nunca gravou uma batida.")
+
+          b = linhas[0]
+          quando = datetime.fromisoformat(b["executado_em"].replace("Z", "+00:00"))
+          minutos = int((datetime.now(timezone.utc) - quando).total_seconds() // 60)
+          print(f"Última batida há {minutos} min: e-mails {b['emails_lidos']}, XML novos {b['xml_novos']}, "
+                f"NF gravadas {b['nf_gravadas']}, erros {b['erros']}, limite atingido {b['limite_atingido']}.")
+
+          problemas = []
+          if minutos > limite_min:
+              problemas.append(f"(a) sem batida há {minutos} min (limite {limite_min}): o leitor parou, travou ou não rodou.")
+          if b["limite_atingido"] and b["nf_gravadas"] == 0 and b["xml_novos"] == 0:
+              problemas.append("(b) a última rodada atingiu o limite de e-mails sem gravar nada novo: leitor preso relendo e-mails antigos.")
+          if b["erros"] > 0:
+              problemas.append(f"(c) a última rodada teve {b['erros']} erro(s): ver captura/relatorio_falhas.py.")
+          if problemas:
+              for p in problemas:
+                  print(f"::error::{p}")
+              sys.exit(1)
+          print("Captura em dia.")
+          PY
