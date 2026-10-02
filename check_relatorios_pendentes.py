@@ -113,8 +113,9 @@ def _regra_nova_cria_hoje(today):
 
 
 def buscar_status_uc(mes, ano):
-    """Retorna dict uc_codigo → row de v_status_uc para o mes/ano."""
-    rows = select("v_status_uc", filters={"mes": "eq.%d" % mes, "ano": "eq.%d" % ano})
+    """Retorna dict uc_codigo → row de v_status_uc_dx para o mes/ano (fatura_recebida,
+    nf_status, diagnostico, acao_responsavel — ver DSR-2.2)."""
+    rows = select("v_status_uc_dx", filters={"mes": "eq.%d" % mes, "ano": "eq.%d" % ano})
     return {r["uc_codigo"]: r for r in rows}
 
 # Coordenadores — recebem, em todo dia de checagem, 1 e-mail consolidado com
@@ -258,6 +259,37 @@ TEXTO_EXPLICATIVO_TIPO = (
     'do relatório.</p>'
 )
 
+# DSR-3.1 — texto por UC no e-mail individual do gestor (v_status_uc_dx, DSR-2.2).
+NF_STATUS_LABEL = {
+    "recebida": "Recebida",
+    "parcial": "Parcial",
+    "faltando": "Faltando",
+    "nao_se_aplica": "Não se aplica",
+    "indeterminado": "Indeterminado",
+}
+
+# Ação sugerida por UC. "admin"/"revisar" (cadastro incompleto ou caso não
+# previsto pela regra da DSR-2.2) ficam sem texto de ação aqui: decisão do
+# Leo (02/10/2026) é não aparecer como grupo pro gestor — essas UCs só
+# aparecem agrupadas no e-mail dos coordenadores (DSR-3.2).
+ACAO_LABEL_GESTOR = {
+    "gestor": "Você precisa gerar o relatório",
+    "cliente": "Fale com o cliente (fatura)",
+    "cliente_e_geradora": "Fale com o cliente e com a geradora",
+    "geradora": "Fale com a geradora (NF)",
+}
+
+# Agrupamento do e-mail do gestor, na ordem pedida (DSR-3.1): quem precisa
+# agir primeiro é o próprio gestor, depois o cliente, depois a geradora.
+# "admin"/"revisar" não entram em nenhum grupo aqui (ver ACAO_LABEL_GESTOR).
+GRUPO_ACAO_GESTOR = {"gestor": "gestor", "cliente": "cliente", "cliente_e_geradora": "cliente", "geradora": "geradora"}
+GRUPO_ACAO_LABEL = {
+    "gestor": "Falta você gerar",
+    "cliente": "Falta fatura: falar com o cliente",
+    "geradora": "Falta NF: falar com a geradora",
+}
+GRUPO_ACAO_ORDEM = ["gestor", "cliente", "geradora"]
+
 
 def tipo_cobranca_label(uc):
     return TIPO_COBRANCA_LABEL.get((uc.get("custo_servico") or "").strip(), "Não informado")
@@ -268,7 +300,25 @@ def _ordenar_por_tipo(ucs_pendentes):
     return sorted(ucs_pendentes, key=lambda uc: ordem_idx.get(tipo_cobranca_label(uc), len(ORDEM_TIPO)))
 
 
-def montar_uc_cards_html(ucs_pendentes, mostrar_gestor=False, mostrar_tipo=False):
+def _status_linha_html(uc, status_uc):
+    """DSR-3.1: linha com Fatura, NF e Ação por UC, lendo v_status_uc_dx
+    (status_uc, de buscar_status_uc). Sem status (UC sem linha na view,
+    ou chamada sem status_uc) não mostra nada — mantém o card antigo."""
+    st = status_uc.get(uc["uc_codigo"]) if status_uc else None
+    if not st:
+        return ""
+    fatura = "Recebida" if st.get("fatura_recebida") else "Não recebida"
+    nf = NF_STATUS_LABEL.get(st.get("nf_status"), st.get("nf_status") or "—")
+    acao = ACAO_LABEL_GESTOR.get(st.get("acao_responsavel"), "")
+    return (
+        '<div style="font-size:11.5px;color:#475467;margin-top:4px;">'
+        f'Fatura: <b>{fatura}</b> · NF: <b>{nf}</b>'
+        + (f' · Ação: <b>{acao}</b>' if acao else '')
+        + '</div>'
+    )
+
+
+def montar_uc_cards_html(ucs_pendentes, mostrar_gestor=False, mostrar_tipo=False, status_uc=None):
     return "".join(
         f'<div style="border:1px solid #DDE4EE;border-radius:10px;padding:10px 14px;margin-bottom:8px;background:#FAFCFF;">'
         f'<span style="font-size:13.5px;font-weight:600;color:#1F2430;">{uc.get("cliente_nome") or "cliente não identificado"}</span>'
@@ -279,7 +329,9 @@ def montar_uc_cards_html(ucs_pendentes, mostrar_gestor=False, mostrar_tipo=False
         )
         + f'<div style="font-size:12px;color:#667085;margin-top:3px;">UC {uc["uc_codigo"]}'
         + (f' · Gestor: <b>{uc["gestor_nome"]}</b>' if mostrar_gestor else '')
-        + '</div></div>'
+        + '</div>'
+        + _status_linha_html(uc, status_uc)
+        + '</div>'
         for uc in ucs_pendentes
     )
 
@@ -329,28 +381,66 @@ def montar_secao_gestor_html(gestor_nome, ucs_pendentes, total_gestor):
     )
 
 
-def montar_secao_tipo_html(tipo_label, ucs_pendentes):
+def montar_secao_tipo_html(tipo_label, ucs_pendentes, status_uc=None):
     return (
         f'<p style="margin:18px 0 8px;">'
         f'<span style="display:inline-block;background:#E7F7F0;color:#1F946D;font-size:11px;font-weight:700;'
         f'padding:3px 10px;border-radius:999px;">{tipo_label} ({len(ucs_pendentes)})</span></p>'
-        f'{montar_uc_cards_html(ucs_pendentes)}'
+        f'{montar_uc_cards_html(ucs_pendentes, status_uc=status_uc)}'
     )
 
 
-def montar_corpo_por_tipo_html(pendentes):
+def montar_corpo_por_tipo_html(pendentes, status_uc=None, incluir_legenda=True):
     """Agrupa UCs por tipo de cobrança (Variável/Fixa/Híbrida), Variável
     sempre primeiro — reaproveitado no email do gestor individual e no do
-    financeiro."""
+    financeiro. `incluir_legenda=False` é usado pela DSR-3.1 (grupo por
+    ação) pra não repetir o texto explicativo de tipo a cada grupo."""
     por_tipo = defaultdict(list)
     for uc in pendentes:
         por_tipo[tipo_cobranca_label(uc)].append(uc)
     secoes = "".join(
-        montar_secao_tipo_html(tipo, por_tipo[tipo])
+        montar_secao_tipo_html(tipo, por_tipo[tipo], status_uc=status_uc)
         for tipo in ORDEM_TIPO
         if por_tipo.get(tipo)
     )
-    return TEXTO_EXPLICATIVO_TIPO + secoes
+    return (TEXTO_EXPLICATIVO_TIPO if incluir_legenda else "") + secoes
+
+
+def _bucket_acao_gestor(status_uc, uc):
+    st = status_uc.get(uc["uc_codigo"]) if status_uc else None
+    return GRUPO_ACAO_GESTOR.get(st.get("acao_responsavel")) if st else None
+
+
+def montar_corpo_por_acao_e_tipo_html(pendentes, status_uc):
+    """DSR-3.1: e-mail individual do gestor. Agrupa primeiro por quem
+    precisa agir (Falta você gerar → Falta fatura/cliente → Falta NF/
+    geradora), na ordem pedida pelo Leo; dentro de cada grupo mantém a
+    separação por tipo de cobrança (Variável primeiro) que já existia.
+    UC cujo `acao_responsavel` é 'admin' ou 'revisar' (cadastro incompleto
+    ou caso fora das 3 regras — raro, 0 casos em produção até 01/10/2026)
+    não entra em nenhum grupo aqui: decisão do Leo (02/10/2026) é não
+    aparecer pro gestor com um rótulo de ação errado; essas UCs só
+    aparecem agrupadas no e-mail dos coordenadores (DSR-3.2). A UC
+    continua pendente e aparece listada normalmente, sem Ação."""
+    por_bucket = defaultdict(list)
+    sem_bucket = []
+    for uc in pendentes:
+        bucket = _bucket_acao_gestor(status_uc, uc)
+        (por_bucket[bucket] if bucket else sem_bucket).append(uc)
+
+    secoes = [TEXTO_EXPLICATIVO_TIPO]
+    for bucket in GRUPO_ACAO_ORDEM:
+        ucs_bucket = por_bucket.get(bucket)
+        if not ucs_bucket:
+            continue
+        secoes.append(
+            f'<p style="margin:20px 0 2px;font-size:13px;font-weight:700;color:#1F2430;">'
+            f'{GRUPO_ACAO_LABEL[bucket]} ({len(ucs_bucket)})</p>'
+        )
+        secoes.append(montar_corpo_por_tipo_html(ucs_bucket, status_uc=status_uc, incluir_legenda=False))
+    if sem_bucket:
+        secoes.append(montar_corpo_por_tipo_html(sem_bucket, status_uc=status_uc, incluir_legenda=False))
+    return "".join(secoes)
 
 
 def enviar_email(to_nome, to_email, assunto, corpo_html):
@@ -370,13 +460,19 @@ def enviar_email(to_nome, to_email, assunto, corpo_html):
     return resp.json()
 
 
-def enviar_email_brevo(gestor_nome, gestor_email, ucs_pendentes, mes, ano, total_gestor, totais_gestor_tipo):
+def enviar_email_brevo(gestor_nome, gestor_email, ucs_pendentes, mes, ano, total_gestor, totais_gestor_tipo, status_uc=None):
     pendentes_tipo = Counter(tipo_cobranca_label(uc) for uc in ucs_pendentes)
     heading = (
         f"Olá, {gestor_nome}! Relatório de {mes:02d}/{ano}."
         + resumo_entrega_html(total_gestor, len(ucs_pendentes), totais_gestor_tipo, pendentes_tipo)
     )
-    html = email_template("Relatório pendente", heading, montar_corpo_por_tipo_html(ucs_pendentes))
+    # DSR-3.1: com status_uc (v_status_uc_dx), mostra fatura/NF/ação por UC,
+    # agrupado por quem precisa agir. Sem status_uc, mantém o corpo antigo.
+    corpo = (
+        montar_corpo_por_acao_e_tipo_html(ucs_pendentes, status_uc)
+        if status_uc else montar_corpo_por_tipo_html(ucs_pendentes)
+    )
+    html = email_template("Relatório pendente", heading, corpo)
     return enviar_email(
         gestor_nome, gestor_email,
         f"Relatório de desempenho pendente — {len(ucs_pendentes)} UC(s) — {mes:02d}/{ano}",
@@ -493,11 +589,11 @@ def run(env_name="test", turno="manha", force=False, dry_run=False):
         dia_20_efetivo = _dia_efetivo(today.year, today.month, DIA_CRIACAO_CARD)
         cria_solicitacao = turno == "manha" and today == dia_20_efetivo
 
-    # Regra nova: carrega v_status_uc uma vez para filtrar fatura+NF por UC
-    if CRM_REGRA_NOVA and cria_solicitacao:
-        status_uc = buscar_status_uc(mes, ano)
-    else:
-        status_uc = {}
+    # v_status_uc_dx (fatura/NF/ação por UC) — usada no corpo do e-mail do
+    # gestor (DSR-3.1) e, quando CRM_REGRA_NOVA está ligada, também pra
+    # filtrar fatura+NF na criação de card (DSR-3.3). Carregada sempre que
+    # há pendente, independente da regra do CRM estar ligada.
+    status_uc = buscar_status_uc(mes, ano)
 
     total_notificados = total_solicitacoes = 0
 
@@ -532,6 +628,7 @@ def run(env_name="test", turno="manha", force=False, dry_run=False):
             gestor_nome, gestor_email, ucs_pendentes, mes, ano,
             totais_por_gestor.get(gestor_email, len(ucs_pendentes)),
             totais_por_gestor_tipo.get(gestor_email, {}),
+            status_uc=status_uc,
         )
         total_notificados += 1
 
